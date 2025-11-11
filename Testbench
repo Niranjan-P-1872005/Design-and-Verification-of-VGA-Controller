@@ -1,0 +1,154 @@
+module tb_vga_endcheck_full_fast;
+
+    // Clock / reset
+    logic clk;
+    logic reset;
+
+    // VGA inputs (driven only from this TB)
+    logic R, G, B;
+
+    // VGA outputs
+    logic hsync, vsync, video_on;
+    logic [9:0] h_count;
+    logic [9:0] v_count;
+    logic [3:0] rgb_out;
+
+    // debug ticks (from DUT)
+    logic baud_tick, sample_tick;
+
+    // DUT timing params (parameter only)
+    localparam int TB_CLK_FREQ = 50_000_000; // used by DUT parameter
+    localparam int H_TOTAL = 800;
+    localparam int V_TOTAL = 525;
+
+    // Instantiate DUT — normal pixel stepping (counters advance every clk)
+    vga_controller #(
+        .CLK_FREQ(TB_CLK_FREQ),
+        .BAUD(115200),
+        .USE_SLOW_TICK(0),
+        .USE_SAMPLE_TICK(0),
+        .SLOW_PIXELS_PER_TICK(1)
+    ) dut (
+        .clk(clk),
+        .reset(reset),
+        .R(R), .G(G), .B(B),
+        .hsync(hsync),
+        .vsync(vsync),
+        .video_on(video_on),
+        .h_count(h_count),
+        .v_count(v_count),
+        .rgb_out(rgb_out),
+        .baud_tick(baud_tick),
+        .sample_tick(sample_tick)
+    );
+
+    // ---------- Clock: 100 MHz (10 ns period) ----------
+    initial begin
+        clk = 0;
+        forever #5 clk = ~clk;
+    end
+
+    // ---------- VCD dump: limit to DUT to reduce file size ----------
+    initial begin
+        $dumpfile("tb_vga_endcheck_fast.vcd");
+        // Dump only DUT hierarchy to keep VCD parser-friendly.
+        $dumpvars(0, dut);
+    end
+
+    // ---------- Stimulus: reset and extremely fast RGB pattern generator ----------
+    initial begin
+        // initialize
+        reset = 1;
+        R = 0; G = 0; B = 0;
+        #200;
+        reset = 0;
+
+        // short wait before color changes
+        #500;
+
+        // VERY FAST: Cycle through all 8 RGB combinations every 2 us (2,000 ns)
+        // Repeat to produce many transitions within short total simulation window.
+        repeat (10) begin
+            R = 0; G = 0; B = 0;  #2_000; // Black
+            R = 1; G = 0; B = 0;  #2_000; // Red
+            R = 0; G = 1; B = 0;  #2_000; // Green
+            R = 0; G = 0; B = 1;  #2_000; // Blue
+            R = 1; G = 1; B = 0;  #2_000; // Yellow
+            R = 1; G = 0; B = 1;  #2_000; // Magenta
+            R = 0; G = 1; B = 1;  #2_000; // Cyan
+            R = 1; G = 1; B = 1;  #2_000; // White
+        end
+
+        // return to black and hold
+        R = 0; G = 0; B = 0;
+    end
+
+    // ---------- Monitor: detect end-of-line, end-of-frame, and frame wrap ----------
+    bit seen_h_end = 0;
+    bit seen_v_end = 0;
+    int frame_wraps = 0;
+    bit finish_req = 0;
+    logic [9:0] prev_v;
+
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) begin
+            seen_h_end <= 0;
+            seen_v_end <= 0;
+            frame_wraps <= 0;
+            finish_req <= 0;
+            prev_v <= 10'h0;
+        end else begin
+            // detect horizontal end (h_count == H_TOTAL-1)
+            if (!seen_h_end && h_count == (H_TOTAL - 1)) begin
+                seen_h_end <= 1;
+                $display("[%0t] INFO: h_count reached H_TOTAL-1 = %0d (rgb_out=%b)", $time, h_count, rgb_out);
+            end
+
+            // detect vertical end (v_count == V_TOTAL-1)
+            if (!seen_v_end && v_count == (V_TOTAL - 1)) begin
+                seen_v_end <= 1;
+                $display("[%0t] INFO: v_count reached V_TOTAL-1 = %0d (h_count=%0d rgb_out=%b)", $time, v_count, h_count, rgb_out);
+            end
+
+            // detect frame wrap: v_count transitions from V_TOTAL-1 -> 0 at h_count==0
+            if (h_count == 0 && v_count == 0 && prev_v == (V_TOTAL - 1)) begin
+                frame_wraps <= frame_wraps + 1;
+                $display("[%0t] INFO: Frame wrap observed (count=%0d).", $time, frame_wraps);
+            end
+
+            prev_v <= v_count;
+
+            // request finish once both end markers seen and at least one frame wrap observed
+            if (seen_h_end && seen_v_end && frame_wraps >= 1 && !finish_req) begin
+                finish_req <= 1;
+                $display("[%0t] INFO: Finish requested: conditions met.", $time);
+            end
+        end
+    end
+
+    // ---------- Finalization block (use delays, stop dump, and finish) ----------
+    initial begin
+        // safety hard timeout: 90 ms simulated time (parser warning occurred around 108 ms in your capture)
+        fork
+            begin
+                wait (finish_req == 1);
+                // small settling time for VCD
+                #2000;
+                // stop writing more waveform data
+                $dumpoff;
+                $display("[%0t] SUMMARY: h_count=%0d v_count=%0d frames=%0d rgb_out=%b",
+                         $time, h_count, v_count, frame_wraps, rgb_out);
+                $finish;
+            end
+            begin
+                #90_000_000; // 90 ms
+                $display("[%0t] TIMEOUT: 90 ms reached. Forcing finish. h=%0d v=%0d frames=%0d",
+                         $time, h_count, v_count, frame_wraps);
+                $dumpoff;
+                $finish;
+            end
+        join_any
+        disable fork;
+    end
+
+endmodule
