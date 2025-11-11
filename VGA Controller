@@ -1,0 +1,115 @@
+`timescale 1ns / 1ps
+
+module vga_controller(
+    input  logic clk,
+    input  logic reset,
+    input  logic R, G, B,               // Separate color inputs
+    output logic hsync,
+    output logic vsync,
+    output logic video_on,
+    output logic [9:0] h_count,
+    output logic [9:0] v_count,
+    output logic [3:0] rgb_out,
+    // debug outputs
+    output logic baud_tick,
+    output logic sample_tick
+);
+
+    // VGA timing parameters (unchanged)
+    parameter int H_DISPLAY = 640, H_FP = 16, H_SYNC = 96, H_BP = 48, H_TOTAL = 800;
+    parameter int V_DISPLAY = 480, V_FP = 10, V_SYNC = 2, V_BP = 33, V_TOTAL = 525;
+
+    // Baud generator parameters
+    parameter int CLK_FREQ = 50_000_000;
+    parameter int BAUD     = 115200;
+
+    // Slow stepping controls:
+    // - If USE_SLOW_TICK==0 : normal pixel clock stepping each clk
+    // - If USE_SLOW_TICK==1 : step only when selected tick pulses
+    // - If USE_SAMPLE_TICK==1 : use sample_tick (16x) else use baud_tick
+    // - SLOW_PIXELS_PER_TICK: how many horizontal pixels to advance per tick
+    parameter bit USE_SLOW_TICK        = 0;
+    parameter bit USE_SAMPLE_TICK      = 0;
+    parameter int  SLOW_PIXELS_PER_TICK = 1; // set >1 to speed up (e.g. 8, 16, 32)
+
+    logic [2:0] color_in;
+    assign color_in = {R, G, B};
+
+    // Instantiate baud generator (produces baud_tick, sample_tick)
+    baud_gen #(
+        .CLK_FREQ(CLK_FREQ),
+        .BAUD(BAUD)
+    ) u_baud_gen (
+        .clk(clk),
+        .reset(reset),
+        .baud_tick(baud_tick),
+        .sample_tick(sample_tick)
+    );
+
+    // Determine step_enable pulse (1-cycle pulse when we should step)
+    logic step_enable;
+    always_comb begin
+        if (!USE_SLOW_TICK) step_enable = 1'b1; // step every clk
+        else begin
+            if (USE_SAMPLE_TICK) step_enable = sample_tick;
+            else                  step_enable = baud_tick;
+        end
+    end
+
+    // Safe clamp for SLOW_PIXELS_PER_TICK (at least 1)
+    localparam int EFFECTIVE_STEP = (SLOW_PIXELS_PER_TICK >= 1) ? SLOW_PIXELS_PER_TICK : 1;
+
+    // Horizontal & vertical counters:
+    // On each step_enable we advance h_count by EFFECTIVE_STEP.
+    // We compute number of wraps to increment v_count properly.
+    logic [15:0] new_h;          // intermediate width to hold sum
+    logic [15:0] wraps;          // number of h wraps in this step
+
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) begin
+            h_count <= 0;
+            v_count <= 0;
+        end else begin
+            if (step_enable) begin
+                // compute new horizontal count and wraps
+                new_h = h_count + EFFECTIVE_STEP;
+                wraps = new_h / H_TOTAL;
+                h_count <= new_h % H_TOTAL;
+
+                if (wraps != 0) begin
+                    // increment v_count by wraps (modulo V_TOTAL)
+                    if (v_count + wraps >= V_TOTAL)
+                        v_count <= (v_count + wraps) % V_TOTAL;
+                    else
+                        v_count <= v_count + wraps;
+                end
+            end
+        end
+    end
+
+    // Sync pulse generation (combinational from counters)
+    assign hsync = ((h_count >= (H_DISPLAY + H_FP)) &&
+                     (h_count <  (H_DISPLAY + H_FP + H_SYNC)));
+    assign vsync = ((v_count >= (V_DISPLAY + V_FP)) &&
+                     (v_count <  (V_DISPLAY + V_FP + V_SYNC)));
+
+    // Active video region
+    assign video_on = (h_count < H_DISPLAY) && (v_count < V_DISPLAY);
+
+    // Color generation (unchanged)
+    always_comb begin
+        if (video_on) begin
+            case (color_in)
+                3'b000: rgb_out = 4'b0000; // Black
+                3'b001: rgb_out = 4'b0001; // Blue
+                3'b010: rgb_out = 4'b0010; // Green
+                3'b011: rgb_out = 4'b0011; // Cyan
+                3'b100: rgb_out = 4'b0100; // Red
+                3'b101: rgb_out = 4'b0101; // Magenta
+                3'b110: rgb_out = 4'b0110; // Yellow
+                3'b111: rgb_out = 4'b0111; // White
+            endcase
+        end else rgb_out = 4'b0000;
+    end
+
+endmodule
