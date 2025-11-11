@@ -1,0 +1,47 @@
+module baud_gen #(
+    parameter int CLK_FREQ = 50_000_000,
+    parameter int BAUD     = 115200
+)(
+    input  logic clk,
+    input  logic reset,
+    output logic baud_tick,
+    output logic sample_tick
+);
+    localparam int DIV_BAUD   = (BAUD > 0) ? (CLK_FREQ / BAUD) : 1;
+    localparam int DIV_SAMPLE = (BAUD > 0) ? (CLK_FREQ / (BAUD * 16)) : 1;
+
+    localparam int CNTW_BAUD   = $clog2( (DIV_BAUD>0) ? DIV_BAUD : 1 ) + 1;
+    localparam int CNTW_SAMPLE = $clog2( (DIV_SAMPLE>0) ? DIV_SAMPLE : 1 ) + 1;
+
+    logic [CNTW_BAUD-1:0]   baud_cnt;
+    logic [CNTW_SAMPLE-1:0] sample_cnt;
+
+    always_ff @(posedge clk or posedge reset) begin
+        if (reset) begin
+            baud_cnt   <= 0;
+            sample_cnt <= 0;
+            baud_tick  <= 0;
+            sample_tick<= 0;
+        end else begin
+            // default: deassert pulses
+            baud_tick   <= 0;
+            sample_tick <= 0;
+
+            // baud counter
+            if (baud_cnt >= DIV_BAUD - 1) begin
+                baud_cnt  <= 0;
+                baud_tick <= 1'b1;
+            end else begin
+                baud_cnt <= baud_cnt + 1;
+            end
+
+            // sample counter (16x oversample)
+            if (sample_cnt >= DIV_SAMPLE - 1) begin
+                sample_cnt  <= 0;
+                sample_tick <= 1'b1;
+            end else begin
+                sample_cnt <= sample_cnt + 1;
+            end
+        end
+    end
+endmodule
